@@ -1,0 +1,26 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# IDE / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Project output
+output/
+
+# Ultralytics / training artifacts (if they appear)
+runs/
+*.pt
+*.onnx
+
+# Logs
+*.log
