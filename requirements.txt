@@ -2,3 +2,8 @@ numpy
 opencv-python
 ultralytics
 PyQt6
+openvino>=2024.0.0
+onnxruntime
+onnxslim
+python-docx
+Pillow

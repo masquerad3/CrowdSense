@@ -22,5 +22,19 @@ runs/
 *.pt
 *.onnx
 
+# Allow pre-trained models inside models/ folder so they are pushed to Git
+!models/*.pt
+!models/*.onnx
+!models/yolo11n_openvino_model/
+
+# Ignore large raw video files, but keep one small sample for demo purposes
+videos/*
+!videos/6575-193379301.mp4
+
 # Logs
 *.log
+
+# CrowdSense database (contains password hashes — never commit)
+data/
+*.db
+*.sqlite
