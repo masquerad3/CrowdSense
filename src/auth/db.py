@@ -8,11 +8,16 @@ persistent settings, session analytics, and database retention/purging.
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
+import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+if getattr(sys, 'frozen', False):
+    ROOT_DIR = Path(sys.executable).resolve().parent
+else:
+    ROOT_DIR = Path(__file__).resolve().parents[2]
 DB_DIR = ROOT_DIR / "data"
 DB_PATH = DB_DIR / "crowdsense.db"
+
 
 
 def get_db_connection() -> sqlite3.Connection:

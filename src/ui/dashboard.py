@@ -2,8 +2,10 @@
 CrowdSense — Dashboard Tab  (src/ui/dashboard.py)
 """
 
+import sys
 from datetime import datetime
 from pathlib import Path
+
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -240,12 +242,16 @@ class DashboardTab(QWidget):
 
     def _update_clock(self):
         self.lbl_clock.setText(datetime.now().strftime("%H:%M:%S"))
-
     def set_logo_state(self):
         """Load and scale the CrowdSense logo cleanly to 140px width (no circle masks or borders)."""
-        logo_path = Path(__file__).resolve().parents[2] / "assets" / "logo.png"
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            logo_path = Path(sys._MEIPASS) / "assets" / "logo.png"
+        else:
+            logo_path = Path(__file__).resolve().parents[2] / "assets" / "logo.png"
         if not logo_path.exists():
             return
+
+
 
         pixmap = QPixmap(str(logo_path))
         if pixmap.isNull():

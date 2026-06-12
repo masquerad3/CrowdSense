@@ -3,6 +3,7 @@ CrowdSense — About Tab  (src/ui/about_tab.py)
 Displays app branding, version info, and logo.
 """
 
+import sys
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -11,7 +12,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
-_ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _ASSETS_DIR = Path(sys._MEIPASS) / "assets"
+else:
+    _ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+
 
 
 class AboutTab(QWidget):

@@ -5,6 +5,7 @@ Orchestrates the detection pipeline, UI tabs, settings persistence,
 session analytics recording, and alerting (winsound + native tray notification).
 """
 
+import sys
 import time
 import winsound
 import threading
@@ -29,7 +30,10 @@ from ui.analytics import AnalyticsTab
 from ui.logs_tab import LogsTab
 from ui.about_tab import AboutTab
 
-_ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _ASSETS_DIR = Path(sys._MEIPASS) / "assets"
+else:
+    _ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 
 class MainWindow(QMainWindow):

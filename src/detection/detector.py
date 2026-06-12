@@ -30,8 +30,13 @@ import numpy as np
 from pathlib import Path
 from ultralytics import YOLO
 
+import sys
 # ── Model auto-detection ──────────────────────────────────────────────────────
-_MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+if getattr(sys, 'frozen', False):
+    _MODELS_DIR = Path(sys.executable).resolve().parent / "models"
+else:
+    _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+
 
 # Priority order: OpenVINO > ONNX > PyTorch (for each model variant)
 # Each entry: (path, display_label)

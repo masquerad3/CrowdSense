@@ -17,7 +17,11 @@ from auth.db import init_db
 from ui.main_window import MainWindow
 from ui.styles import MAIN_STYLESHEET
 
-_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    _ASSETS_DIR = Path(sys._MEIPASS) / "assets"
+else:
+    _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+
 
 
 def main():
