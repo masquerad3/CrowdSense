@@ -1,102 +1,102 @@
-# CrowdSense
+# CrowdSense — Offline Real-Time Crowd Monitoring & Analytics
+
+CrowdSense is an offline-first desktop application designed to monitor entryway and indoor crowd density in real time using local computer vision. The system processes local video files or live camera feeds, counts occupants using optimized **YOLOv11** models, raises desktop notifications and warnings when configurable safety limits are breached, and plots occupancy analytics on an interactive vector trend chart.
+
+Developed as a course project for **COMP 019** (Applications Development and Emerging Technologies) and **COMP 086** (Information Assurance and Security) by **Samuel T. Muralidharan**.
 
 ---
-CrowdSense is a **desktop application** that analyzes video footage to detect people, estimate crowd density, and trigger alerts when occupancy exceeds a configurable safety limit. It is intended for safety monitoring in locations such as corridors, venues, and public spaces.
+
+## 🌟 Key Features
+
+- **Real-Time Edge Detection**: Asynchronous background detection workers run YOLOv11 person classification without blocking the PyQt6 GUI event loop.
+- **Intel/Google OpenVINO CPU Optimization**: Compiles PyTorch models to run on standard consumer CPUs, delivering up to **30 FPS** at sub-15ms latency with zero GPU requirements.
+- **Interactive Analytics Board**: Custom QPainter vector graphing widget with a floating tooltip, concentric highlight circle, and vertical guide lines that follow mouse movements.
+- **Historical Safety Limit Mapping**: Logs active settings thresholds upon session creation, ensuring that past sessions are rendered using their historical safety limits even if settings change later.
+- **Tamper-Evident Cryptographic Audit Trail**: Chains audit log rows sequentially using **SHA-256 hash dependencies** (mini-blockchain). The Admin tab automatically audits the chain on load, displaying alert banners if manual database modification is detected.
+- **Real-Time Settings Sliders**: Features smooth horizontal sliders for confidence and safety limit thresholds. Drag to update parameters in real time, or double-click slider labels to input custom numbers (which automatically extends the slider range).
+- **Data Retention & Local Backups**: Supports automatic database pruning (retaining logs for 30/60/90 days or indefinitely) alongside side-by-side **Export Backup** and **Import Backup** buttons defaulting to the local `data/` directory.
 
 ---
-## Features (Planned MVP by June 20, 2026)
-- Load and preview local video files (**offline**)
-- Detect people using **Ultralytics YOLOv8** (default: `yolov8n`)
-- Live people count + density level classification (Low/Med/High/Critical)
-- Configurable safety limit with alert + cooldown (prevents repeated alert spam)
-- Export run logs to `output/` (CSV)
+
+## 🛠️ Technology Stack
+
+| Layer | Component |
+| :--- | :--- |
+| **Frontend GUI** | PyQt6 (Python bindings for Qt6) |
+| **Styling** | Custom Dark-Theme stylesheet overrides (`src/ui/styles.py`) |
+| **Database** | SQLite3 (configured with Write-Ahead Logging for concurrent reading/writing) |
+| **AI Base Model** | Ultralytics YOLOv11 (YOLO11n person-class classification) |
+| **Inference Runtime** | Intel OpenVINO runtime (pruned and compiled for local CPU execution) |
+| **Video Processing** | OpenCV-Python (frame preprocessing, scaling, and HUD drawings) |
+| **Compiler / Packager** | PyInstaller (bundled standalone directory compilation) |
 
 ---
-## Tech Stack
-- Python 3.10+ (recommended: **3.11**)
-- PyQt6 (desktop UI)
-- OpenCV (video reading + drawing overlays)
-- Ultralytics YOLOv8 (person detection)
 
----
-## Project Structure
+## 📂 Project Structure
+
 ```text
 CrowdSense/
-  README.md
-  requirements.txt
-  .gitignore
-  models/           # local model weights
-  output/           # logs/exports
-  videos/        
-  src/
-    main.py
+├── assets/                  # Graphical icons and checkmark textures
+├── data/                    # Persistent local SQLite database storage (ignored by git)
+├── models/                  # Local YOLO weights and OpenVINO IR files (ignored by git)
+├── src/                     # Python source files
+│   ├── auth/                # Database interfaces, settings, and cryptographic hashes
+│   ├── detection/           # OpenCV video capture and YOLO worker threads
+│   ├── ui/                  # Main GUI window, settings, and custom line charts
+│   └── main.py              # Application entry point
+├── CrowdSense.spec          # PyInstaller build specification
+├── requirements.txt         # Python library dependencies
+└── README.md                # Project README documentation
 ```
 
 ---
-## Setup (PyCharm)
-### 1) Create and select a virtual environment (venv)
-PyCharm:
-- Settings → Project → Python Interpreter → Add Interpreter
-- Virtualenv → **Generate new**
-- Base interpreter: Python **3.11**
-- Location: `<project>/.venv`
-- Leave “Inherit packages…” unchecked
 
-### 2) Install dependencies
-From the PyCharm terminal:
+## 🚀 Getting Started
+
+### Option A: Running from Standalone Executable (.exe)
+No Python installation is required.
+1. Download and extract the **`CrowdSense.zip`** archive from the GitHub Releases tab.
+2. Ensure the `models/` directory (containing `yolo11n_openvino_model/`) is located in the same directory as the executable.
+3. Double-click **`CrowdSense.exe`** inside `dist/CrowdSense/` to launch.
+
+### Option B: Running from Source (Development)
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/masquerad3/CrowdSense.git
+   cd CrowdSense
+   ```
+2. **Set up a Virtual Environment**:
+   - Create a virtual env using Python 3.11:
+     ```bash
+     python -m venv .venv
+     .venv\Scripts\activate
+     ```
+3. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. **Acquire Model Weights**:
+   - Create a `models/` folder in the project root.
+   - For OpenVINO compilation, place the exported OpenVINO directory inside `models/` as `models/yolo11n_openvino_model`.
+5. **Run the Application**:
+   ```bash
+   python src/main.py
+   ```
+
+---
+
+## 🔒 Security & Data Integrity
+
+- **SQL Injection Prevention**: Enforced via fully parameterized queries for all user inputs.
+- **Tamper Evidence**: Uses a SHA-256 hash-chain mapping for the `audit_log` table:
+  $$\text{Entry Hash}_n = \text{SHA256}(\text{Entry Hash}_{n-1} + \text{Username} + \text{Action} + \text{Details} + \text{Timestamp})$$
+  Any direct modification, row deletion, or order swap in the database file will immediately trigger an integrity alarm in the application.
+
+---
+
+## 📦 Compiling and Packaging
+To rebuild the standalone executable with your custom configurations and branding icon:
 ```bash
-pip install -r requirements.txt
+.venv\Scripts\python.exe -m PyInstaller -y --noconsole --name=CrowdSense --add-data "assets;assets" --icon="assets/logo.ico" src/main.py
 ```
-
----
-## Model Weights (Offline)
-CrowdSense uses **YOLOv8n** by default.
-
-1) Create a folder:
-```bash
-mkdir models
-```
-
-2) Download weights once (Ultralytics will fetch them):
-```bash
-python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
-```
-
-3) Place the weights here:
-```text
-models/yolov8n.pt
-```
-
-> Note: Model weight files (`*.pt`) are ignored by git and should not be committed.
-
----
-## Run
-```bash
-python src/main.py
-```
-
----
-## Output
-- Logs/exports will be written to:
-```text
-output/
-```
-
----
-## Troubleshooting
-### OpenCV cannot open a video
-```bash
-python -c "import cv2; cap=cv2.VideoCapture('path/to/video.mp4'); print('opened:', cap.isOpened())"
-```
-
-### Ultralytics model not found / offline issues
-- Confirm the file exists at `models/yolov8n.pt`
-- Ensure your code loads the model by local path (not by name)
-
----
-## Roadmap (High Level)
-- Phase 0: environment + UI skeleton
-- Phase 1: video load + playback
-- Phase 2: detection + overlays + counting
-- Phase 3: alerts + logging + export (CSV)
-- Phase 4: packaging (PyInstaller) + final demo build
+After building, ensure you copy the `models/` weights directory into `dist/CrowdSense/` next to the compiled executable.
