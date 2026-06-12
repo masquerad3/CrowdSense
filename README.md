@@ -1,8 +1,8 @@
-# CrowdSense — Offline Real-Time Crowd Monitoring & Analytics
+# CrowdSense - Offline Real-Time Crowd Monitoring & Analytics
 
 CrowdSense is an offline-first desktop application designed to monitor entryway and indoor crowd density in real time using local computer vision. The system processes local video files or live camera feeds, counts occupants using optimized **YOLOv11** models, raises desktop notifications and warnings when configurable safety limits are breached, and plots occupancy analytics on an interactive vector trend chart.
 
-Developed as a course project for **COMP 019** (Applications Development and Emerging Technologies) and **COMP 086** (Information Assurance and Security) by **Samuel T. Muralidharan**.
+Developed as a course project for **COMP 019** (Applications Development and Emerging Technologies) and Information Assurance and Security.
 
 ---
 
