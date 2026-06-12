@@ -16,6 +16,8 @@ Thumbs.db
 
 # Project output
 output/
+build/
+dist/
 
 # Ultralytics / training artifacts (if they appear)
 runs/
