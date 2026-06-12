@@ -1,88 +1,73 @@
 """
 CrowdSense — About Tab  (src/ui/about_tab.py)
+Displays app branding, version info, and logo.
 """
 
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
+    QWidget, QVBoxLayout, QLabel, QFrame
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
+
+_ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 
 class AboutTab(QWidget):
-    logout_requested = pyqtSignal()
 
-    def __init__(self, username: str, role: str, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.username = username
-        self.role     = role
         self._build_ui()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 28, 32, 24)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        root.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # App title
+        # Container to group elements and align centrally
+        container = QWidget()
+        container_lay = QVBoxLayout(container)
+        container_lay.setContentsMargins(0, 0, 0, 0)
+        container_lay.setSpacing(20)
+        container_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # ── Logo ──────────────────────────────────────────────────────────────
+        logo_path = _ASSETS_DIR / "logo.png"
+        lbl_logo = QLabel()
+        lbl_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if logo_path.exists():
+            pix = QPixmap(str(logo_path))
+            lbl_logo.setPixmap(
+                pix.scaled(250, 250,
+                           Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+            )
+        container_lay.addWidget(lbl_logo)
+
+        # ── App Title & Description ───────────────────────────────────────────
         title = QLabel("CrowdSense")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
-            "font-size: 22px; font-weight: 700; color: #e6edf3;"
+            "font-size: 28px; font-weight: 700; color: #e6edf3; letter-spacing: -0.5px;"
         )
+        container_lay.addWidget(title)
 
         version = QLabel("Crowd Monitoring & Analysis System  |  v1.0")
-        version.setStyleSheet("font-size: 12px; color: #8b949e;")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version.setStyleSheet("font-size: 13px; color: #8b949e; font-weight: 500;")
+        container_lay.addWidget(version)
 
         desc = QLabel(
             "Analyzes video footage to detect and count people in real time, "
             "classify crowd density, and raise alerts when occupancy exceeds a "
             "configurable threshold."
         )
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #8b949e; font-size: 12px; line-height: 1.5;")
+        desc.setMaximumWidth(460)
+        desc.setStyleSheet("color: #8b949e; font-size: 13px; line-height: 1.6;")
+        container_lay.addWidget(desc)
 
-        root.addWidget(title)
-        root.addSpacing(4)
-        root.addWidget(version)
-        root.addSpacing(12)
-        root.addWidget(desc)
-        root.addSpacing(24)
-
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #21262d;")
-        root.addWidget(sep)
-        root.addSpacing(20)
-
-        # Session info
-        session_label = QLabel("Current session")
-        session_label.setStyleSheet("font-size: 11px; color: #484f58;")
-        root.addWidget(session_label)
-        root.addSpacing(10)
-
-        self.lbl_user_info = QLabel()
-        self.lbl_user_info.setStyleSheet("font-size: 13px; color: #c9d1d9; line-height: 1.8;")
-        self.lbl_user_info.setTextFormat(Qt.TextFormat.RichText)
-        self._refresh_user_label()
-        root.addWidget(self.lbl_user_info)
-        root.addSpacing(16)
-
-        btn_logout = QPushButton("Logout")
-        btn_logout.setObjectName("dangerBtn")
-        btn_logout.setFixedWidth(100)
-        btn_logout.clicked.connect(self.logout_requested)
-        root.addWidget(btn_logout)
-
-        root.addStretch()
-
-    def update_user(self, username: str, role: str):
-        self.username = username
-        self.role     = role
-        self._refresh_user_label()
-
-    def _refresh_user_label(self):
-        role_color = "#f85149" if self.role == "admin" else "#3fb950"
-        self.lbl_user_info.setText(
-            f"<b style='color:#e6edf3;'>{self.username}</b>"
-            f"&nbsp;&nbsp;<span style='color:{role_color}; font-size:11px;'>"
-            f"{self.role.upper()}</span>"
-        )
+        root.addWidget(container)

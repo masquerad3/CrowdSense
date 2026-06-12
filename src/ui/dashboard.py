@@ -3,13 +3,14 @@ CrowdSense — Dashboard Tab  (src/ui/dashboard.py)
 """
 
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QSplitter, QFrame, QSizePolicy
+    QComboBox, QSplitter, QFrame, QSizePolicy, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPainterPath, QPen, QColor
 
 
 class DashboardTab(QWidget):
@@ -19,20 +20,19 @@ class DashboardTab(QWidget):
     """
 
     load_requested     = pyqtSignal()
-    live_requested     = pyqtSignal(str)   # camera index string or RTSP URL
+    live_requested     = pyqtSignal(str)   # camera index string
     play_requested     = pyqtSignal()
+    parent_safety_limit = 30
     pause_requested    = pyqtSignal()
     stop_requested     = pyqtSignal()
     speed_changed      = pyqtSignal(float)
     settings_requested = pyqtSignal()
-    logout_requested   = pyqtSignal()
+    overlay_toggled    = pyqtSignal(bool)  # True = show overlay, False = hide
 
     _SPEEDS = {"0.5x": 0.5, "1.0x": 1.0, "1.5x": 1.5, "2.0x": 2.0}
 
-    def __init__(self, username: str, role: str, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.username = username
-        self.role     = role
         self._build_ui()
 
     def _build_ui(self):
@@ -45,7 +45,7 @@ class DashboardTab(QWidget):
 
         # Video preview
         self.video_lbl = QLabel(
-            "No source loaded\n\nSelect a CCTV channel to begin"
+            "No source loaded\n\nLoad a video or start a live camera to begin"
         )
         self.video_lbl.setObjectName("videoPreview")
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -76,26 +76,8 @@ class DashboardTab(QWidget):
         panel.setFixedWidth(175)
 
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(12, 14, 12, 10)
+        lay.setContentsMargins(12, 14, 12, 14)
         lay.setSpacing(0)
-
-        # User info
-        self.lbl_user = QLabel(self.username)
-        self.lbl_user.setStyleSheet(
-            "font-size: 12px; font-weight: 600; color: #e6edf3;"
-        )
-        role_color = "#f85149" if self.role == "admin" else "#3fb950"
-        self.lbl_role = QLabel(self.role.upper())
-        self.lbl_role.setStyleSheet(
-            f"font-size: 10px; color: {role_color}; font-weight: 600;"
-        )
-
-        lay.addWidget(self.lbl_user)
-        lay.addSpacing(2)
-        lay.addWidget(self.lbl_role)
-        lay.addSpacing(12)
-        lay.addWidget(self._sep())
-        lay.addSpacing(10)
 
         # Detection stats (compact key-value rows)
         self.lbl_count_val   = self._val_lbl()
@@ -129,7 +111,25 @@ class DashboardTab(QWidget):
         t.start(1000)
         lay.addWidget(self.lbl_clock)
 
+        lay.addSpacing(8)
+        lay.addWidget(self._sep())
+        lay.addSpacing(10)
+
+        # Overlay toggle checkbox
+        self.chk_overlay = QCheckBox("Show Overlay")
+        self.chk_overlay.setChecked(True)
+        self.chk_overlay.toggled.connect(self.overlay_toggled)
+        lay.addWidget(self.chk_overlay)
+
         lay.addStretch()
+
+        # Dynamic logo (pushed down just above the model status)
+        self.lbl_sidebar_logo = QLabel()
+        self.lbl_sidebar_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.set_logo_state()
+        lay.addWidget(self.lbl_sidebar_logo)
+        lay.addSpacing(10)
+
         lay.addWidget(self._sep())
         lay.addSpacing(8)
 
@@ -139,13 +139,6 @@ class DashboardTab(QWidget):
         self.lbl_model.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_model.setWordWrap(True)
         lay.addWidget(self.lbl_model)
-        lay.addSpacing(8)
-
-        btn_logout = QPushButton("Logout")
-        btn_logout.setObjectName("dangerBtn")
-        btn_logout.setFixedHeight(26)
-        btn_logout.clicked.connect(self.logout_requested)
-        lay.addWidget(btn_logout)
 
         return panel
 
@@ -154,15 +147,14 @@ class DashboardTab(QWidget):
         bar.setObjectName("toolbar")
         cl = QHBoxLayout(bar)
         cl.setContentsMargins(10, 5, 10, 5)
-        cl.setSpacing(3)
+        cl.setSpacing(6)
 
-        self.cmb_channels = QComboBox()
-        self.cmb_channels.addItem("Select CCTV Channel...")
-        self.cmb_channels.addItem("Channel 1: Entrance Lobby (Cam 0)")
-        self.cmb_channels.addItem("Channel 2: Main Gate (Cam 1)")
-        self.cmb_channels.addItem("Channel 3: Custom RTSP/RTMP Feed...")
-        self.cmb_channels.addItem("Channel 4: Load Offline Video File...")
-        self.cmb_channels.currentIndexChanged.connect(self._on_channel_selected)
+        # Two explicit buttons replacing the channel dropdown
+        self.btn_load_video = QPushButton("Load Video File")
+        self.btn_load_video.clicked.connect(self.load_requested)
+
+        self.btn_live_cam = QPushButton("Live Camera")
+        self.btn_live_cam.clicked.connect(self._on_live_cam)
 
         self.btn_play  = QPushButton("Play")
         self.btn_pause = QPushButton("Pause")
@@ -187,14 +179,17 @@ class DashboardTab(QWidget):
 
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.clicked.connect(self.settings_requested)
-        if self.role != "admin":
-            self.btn_settings.hide()
 
         vsep = QFrame()
         vsep.setFrameShape(QFrame.Shape.VLine)
         vsep.setStyleSheet("color: #21262d;")
 
-        cl.addWidget(self.cmb_channels)
+        vsep2 = QFrame()
+        vsep2.setFrameShape(QFrame.Shape.VLine)
+        vsep2.setStyleSheet("color: #21262d;")
+
+        cl.addWidget(self.btn_load_video)
+        cl.addWidget(self.btn_live_cam)
         cl.addSpacing(3)
         cl.addWidget(vsep)
         cl.addSpacing(3)
@@ -204,6 +199,8 @@ class DashboardTab(QWidget):
         cl.addStretch()
         cl.addWidget(QLabel("Speed:"))
         cl.addWidget(self.cmb_speed)
+        cl.addSpacing(6)
+        cl.addWidget(vsep2)
         cl.addSpacing(6)
         cl.addWidget(self.btn_settings)
 
@@ -233,28 +230,33 @@ class DashboardTab(QWidget):
         row.addWidget(val_lbl, 1)
         return row
 
-    def _on_channel_selected(self, index: int):
-        if index == 0:
-            return
-        elif index == 1:
-            self.live_requested.emit("0")
-        elif index == 2:
-            self.live_requested.emit("1")
-        elif index == 3:
-            from ui._camera_picker import CameraPickerDialog
-            dlg = CameraPickerDialog(self)
-            if dlg.exec():
-                source = dlg.selected_source
-                if source is not None:
-                    self.live_requested.emit(str(source))
-        elif index == 4:
-            self.load_requested.emit()
-        
-        # Reset back to the placeholder item so the selection triggers next time as well
-        self.cmb_channels.setCurrentIndex(0)
+    def _on_live_cam(self):
+        from ui._camera_picker import CameraPickerDialog
+        dlg = CameraPickerDialog(self)
+        if dlg.exec():
+            source = dlg.selected_source
+            if source is not None:
+                self.live_requested.emit(str(source))
 
     def _update_clock(self):
         self.lbl_clock.setText(datetime.now().strftime("%H:%M:%S"))
+
+    def set_logo_state(self):
+        """Load and scale the CrowdSense logo cleanly to 140px width (no circle masks or borders)."""
+        logo_path = Path(__file__).resolve().parents[2] / "assets" / "logo.png"
+        if not logo_path.exists():
+            return
+
+        pixmap = QPixmap(str(logo_path))
+        if pixmap.isNull():
+            return
+
+        scaled = pixmap.scaled(
+            140, 140,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.lbl_sidebar_logo.setPixmap(scaled)
 
     # --- Public API (called by MainWindow) ----------------------------------
 
@@ -293,6 +295,8 @@ class DashboardTab(QWidget):
         self.lbl_fps_val.setText(f"{fps:.1f} FPS" if fps > 0 else "-")
         self.lbl_latency_val.setText(f"{latency:.1f} ms" if latency > 0 else "-")
 
+        # No dynamic border needed as circle mask is removed
+
     def set_model_status(self, msg: str):
         self.lbl_model.setText(msg)
 
@@ -307,4 +311,6 @@ class DashboardTab(QWidget):
         self.btn_play.setEnabled(stopped or paused)
         self.btn_pause.setEnabled(playing)
         self.btn_stop.setEnabled(playing or paused)
-        self.cmb_channels.setEnabled(stopped)
+        # Source buttons only usable when stopped
+        self.btn_load_video.setEnabled(stopped)
+        self.btn_live_cam.setEnabled(stopped)

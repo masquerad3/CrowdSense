@@ -1,15 +1,27 @@
+"""
+CrowdSense — Main Window  (src/ui/main_window.py)
+
+Orchestrates the detection pipeline, UI tabs, settings persistence,
+session analytics recording, and alerting (winsound + native tray notification).
+"""
+
 import time
+import winsound
+import threading
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QStatusBar, QMessageBox, QFileDialog,
-    QApplication
+    QApplication, QSystemTrayIcon
 )
-from PyQt6.QtCore import QTimer, QEvent, QObject
-from PyQt6.QtGui import QImage
+from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QImage, QIcon
 
-from auth.db import log_event
+from auth.db import (
+    log_event, get_setting, save_setting,
+    create_session, close_session, insert_reading, prune_database
+)
 from detection.worker import ModelLoaderWorker, DetectionWorker
 from detection.detector import CrowdDetector
 from ui.dashboard import DashboardTab
@@ -17,92 +29,92 @@ from ui.analytics import AnalyticsTab
 from ui.logs_tab import LogsTab
 from ui.about_tab import AboutTab
 
+_ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
+
 
 class MainWindow(QMainWindow):
 
-    SESSION_TIMEOUT_MS = 15 * 60 * 1000   # 15 minutes
-
-    def __init__(self, username: str, role: str):
+    def __init__(self):
         super().__init__()
-        self.username = username
-        self.role = role
+
+        # Generate checkmark image programmatically on boot
+        self._generate_check_image()
 
         # Detection state
         self.detector = None
-        self.loader = None
-        self.worker = None
-        self.video_path = ""
+        self.loader   = None
+        self.worker   = None
+        self.video_path   = ""
+        self.source_label = ""
         self.playback_state = "stopped"
 
-        # Application settings
-        self.safety_limit = 30
-        self.confidence = 0.40
-        self.current_speed = 1.0
-        self.inference_interval = 1
-        self.inference_resolution = 640
+        # Application settings — loaded from DB on startup
+        self.safety_limit         = int(get_setting("safety_limit",         30))
+        self.confidence           = float(get_setting("confidence",          0.40))
+        self.inference_interval   = int(get_setting("inference_interval",    1))
+        self.inference_resolution = int(get_setting("inference_resolution",  640))
+
+        # Session analytics tracking
+        self._current_session_id: int | None = None
         self._last_reading_t = 0.0
+        self._session_peak   = 0
+        self._session_alerts = 0
+        self._session_total  = 0
+        self._session_sum    = 0
 
-        self.build_ui()
-        self.load_model_async()
-        self.start_session_timer()
+        # Alert state
+        self._alert_active   = False
 
-    # Session Management
+        # Notification cooldown logic (cooldown limit: 30 seconds)
+        self._last_notification_t = 0.0
 
-    def start_session_timer(self):
-        self.session_timer = QTimer(self)
-        self.session_timer.setSingleShot(True)
-        self.session_timer.setInterval(self.SESSION_TIMEOUT_MS)
-        self.session_timer.timeout.connect(self._on_session_expired)
-        self.session_timer.start()
-        
-        # Reset the timer on any user activity across the app
-        QApplication.instance().installEventFilter(self)
+        # Overlay state (mirrored from checkbox)
+        self._show_overlay = True
 
-    def eventFilter(self, obj: QObject, event) -> bool:
-        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress):
-            self.session_timer.start()
-        return False
+        self._build_ui()
+        self._load_model_async()
 
-    def _on_session_expired(self):
-        self.sb.showMessage("Session expired due to inactivity.")
-        log_event(self.username, "SESSION_EXPIRED", "Auto-logout after 15 min idle")
-        self.stop_worker()
-        self.hide()
-        QMessageBox.information(
-            None, "Session Expired",
-            "You have been logged out due to 15 minutes of inactivity."
-        )
-        self.prompt_relogin()
+        # Prune database on boot if retention limit is set
+        retention = int(get_setting("retention_days", 0))
+        if retention > 0:
+            prune_database(retention)
 
-    # UI Construction
+    # ── UI Construction ───────────────────────────────────────────────────
 
-    def build_ui(self):
+    def _build_ui(self):
         self.setWindowTitle("CrowdSense")
         self.resize(1280, 760)
         self.setMinimumSize(960, 620)
 
+        # Window icon
+        logo_path = _ASSETS_DIR / "logo.png"
+        if logo_path.exists():
+            self.setWindowIcon(QIcon(str(logo_path)))
+
+        # Initialize QSystemTrayIcon for native notification toast
+        self.tray_icon = QSystemTrayIcon(self)
+        if logo_path.exists():
+            self.tray_icon.setIcon(QIcon(str(logo_path)))
+        self.tray_icon.show()
+
         self.tabs = QTabWidget()
 
-        self.dash = DashboardTab(self.username, self.role)
+        self.dash  = DashboardTab()
         self.analy = AnalyticsTab()
-        self.logs = LogsTab(username=self.username, role=self.role)
-        self.about = AboutTab(username=self.username, role=self.role)
+        self.analy.safety_limit = self.safety_limit  # sync initial safety limit
+        self.logs  = LogsTab()
+        self.about = AboutTab()
 
-        self.tabs.addTab(self.dash, "Dashboard")
+        self.tabs.addTab(self.dash,  "Dashboard")
         self.tabs.addTab(self.analy, "Analytics")
-        self.tabs.addTab(self.logs, "Audit Logs")
+        self.tabs.addTab(self.logs,  "Audit Logs")
         self.tabs.addTab(self.about, "About")
-
-        # Enforce role-based tab access
-        logs_idx = self.tabs.indexOf(self.logs)
-        if logs_idx != -1:
-            self.tabs.setTabVisible(logs_idx, self.role == "admin")
 
         self.setCentralWidget(self.tabs)
 
         self.sb = QStatusBar()
         self.setStatusBar(self.sb)
-        self.sb.showMessage(f"Logged in as {self.username} ({self.role}) | Loading model...")
+        self.sb.showMessage("Loading model...")
 
         # Dashboard signals
         self.dash.load_requested.connect(self._on_load)
@@ -112,14 +124,13 @@ class MainWindow(QMainWindow):
         self.dash.stop_requested.connect(self._on_stop)
         self.dash.speed_changed.connect(self._on_speed)
         self.dash.settings_requested.connect(self._on_settings)
-        self.dash.logout_requested.connect(self._on_logout)
+        self.dash.overlay_toggled.connect(self._on_overlay_toggled)
 
-        self.about.logout_requested.connect(self._on_logout)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-    # Core Model Pipeline
+    # ── Model Pipeline ────────────────────────────────────────────────────
 
-    def load_model_async(self):
+    def _load_model_async(self):
         self.loader = ModelLoaderWorker(
             confidence=self.confidence,
             imgsz=self.inference_resolution,
@@ -131,16 +142,16 @@ class MainWindow(QMainWindow):
     def _on_model_ready(self, detector: CrowdDetector):
         self.detector = detector
         self.dash.set_model_status(f"{detector.model_name} - Ready")
-        self.sb.showMessage(f"Model loaded. Logged in as {self.username} ({self.role}).")
+        self.sb.showMessage("Model loaded. Ready.")
         if self.video_path:
             self.dash.btn_play.setEnabled(True)
 
     def _on_model_error(self, err: str):
         self.dash.set_model_status("Model: load error")
-        self.sb.showMessage("Model error - check that a model file exists in the models/ folder.")
-        log_event(self.username, "MODEL_ERROR", err[:300])
+        self.sb.showMessage("Model error — check that a model file exists in the models/ folder.")
+        log_event("MODEL_ERROR", err[:300])
 
-    # Media Loading & Controls
+    # ── Media Loading & Controls ──────────────────────────────────────────
 
     def _on_load(self):
         videos_dir = str(Path(__file__).resolve().parents[2] / "videos")
@@ -151,18 +162,18 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        self.video_path = path
-        fname = path.replace("\\", "/").split("/")[-1]
-        self.dash.set_video_label(f"{fname}\n\nPress Play to start detection")
-        self.sb.showMessage(f"Video loaded: {fname}")
-        log_event(self.username, "VIDEO_LOADED", fname)
+        self.video_path   = path
+        self.source_label = path.replace("\\", "/").split("/")[-1]
+        self.dash.set_video_label(f"{self.source_label}\n\nPress Play to start detection")
+        self.sb.showMessage(f"Video loaded: {self.source_label}")
+        log_event("VIDEO_LOADED", self.source_label)
 
         if self.detector:
             self.dash.btn_play.setEnabled(True)
 
     def _on_play(self):
         if not self.video_path:
-            self.sb.showMessage("Load a video first.")
+            self.sb.showMessage("Load a video or select a live camera first.")
             return
         if not self.detector:
             self.sb.showMessage("Model is still loading — please wait a moment.")
@@ -170,20 +181,28 @@ class MainWindow(QMainWindow):
 
         if self.playback_state == "paused" and self.worker:
             self.worker.resume()
-            self.set_state("playing")
+            self._set_state("playing")
             self.sb.showMessage("Resumed.")
             return
 
-        self.stop_worker()
+        self._stop_worker()
         self.analy.clear_session()
-        self._last_reading_t = 0.0
+        self._last_reading_t    = 0.0
+        self._session_peak      = 0
+        self._session_alerts    = 0
+        self._session_total     = 0
+        self._session_sum       = 0
+
+        # Open a persistent session record in the database
+        self._current_session_id = create_session(self.source_label, self.safety_limit)
 
         self.worker = DetectionWorker(
             source=self.video_path,
             detector=self.detector,
             safety_limit=self.safety_limit,
-            speed=self.current_speed,
+            speed=getattr(self, "current_speed", 1.0),
             inference_interval=self.inference_interval,
+            show_overlay=self._show_overlay,
         )
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.stats_updated.connect(self._on_stats)
@@ -191,78 +210,134 @@ class MainWindow(QMainWindow):
         self.worker.error_occurred.connect(self._on_detect_error)
         self.worker.start()
 
-        self.set_state("playing")
-        fname = self.video_path.replace("\\", "/").split("/")[-1]
-        log_event(self.username, "DETECTION_STARTED", f"file={fname} limit={self.safety_limit}")
-        self.sb.showMessage("Detection running...")
+        self._set_state("playing")
+        log_event("DETECTION_STARTED",
+                  f"source={self.source_label} limit={self.safety_limit}")
 
     def _on_pause(self):
         if self.worker:
             self.worker.pause()
-        self.set_state("paused")
+        self._set_state("paused")
         self.sb.showMessage("Paused.")
+        # Stop sound loop if active
+        self._stop_alert_sound()
+        self._alert_active = False
 
     def _on_stop(self):
-        self.stop_worker()
-        self.set_state("stopped")
-        self.dash.set_video_label("Stopped. Select a CCTV channel to begin.")
+        self._stop_worker()
+        self._set_state("stopped")
+        self.dash.set_video_label("Stopped. Load a video or select a live camera.")
         self.dash.update_stats(0, "-", "#8b949e", False)
-        log_event(self.username, "DETECTION_STOPPED", "")
+        log_event("DETECTION_STOPPED", "")
         self.sb.showMessage("Stopped.")
+        self._stop_alert_sound()
+        self._alert_active = False
+        self._finalise_session()
 
-    def stop_worker(self):
+    def _stop_worker(self):
         if self.worker:
             self.worker.stop()
             self.worker = None
 
-    # Pipeline Communication Handlers
+    def _finalise_session(self):
+        """Close the current DB session with computed aggregates."""
+        if self._current_session_id is None:
+            return
+        avg = self._session_sum / self._session_total if self._session_total else 0.0
+        close_session(
+            self._current_session_id,
+            peak_count=self._session_peak,
+            avg_count=round(avg, 2),
+            total_samples=self._session_total,
+            alert_events=self._session_alerts,
+        )
+        self._current_session_id = None
+
+    # ── Pipeline Communication ────────────────────────────────────────────
 
     def _on_frame(self, qimage: QImage):
         self.dash.update_frame(qimage)
 
-    def _on_stats(self, count: int, density_label: str, density_color: str, 
+    def _on_stats(self, count: int, density_label: str, density_color: str,
                   is_alert: bool, fps: float = 0.0, latency: float = 0.0):
         self.dash.update_stats(count, density_label, density_color, is_alert, fps, latency)
 
+        # 1-Hz sample recording (live UI + database)
         now = time.monotonic()
         if now - self._last_reading_t >= 1.0:
             self._last_reading_t = now
+            ts_str = datetime.now().strftime("%H:%M:%S")
             self.analy.add_reading(
-                timestamp=datetime.now().strftime("%H:%M:%S"),
+                timestamp=ts_str,
                 count=count,
                 density=density_label,
                 is_alert=is_alert,
             )
+            # Persist to database
+            if self._current_session_id is not None:
+                insert_reading(self._current_session_id, count, density_label, is_alert)
+
+            # Update rolling aggregates for session close
+            self._session_total += 1
+            self._session_sum   += count
+            self._session_peak   = max(self._session_peak, count)
+            if is_alert:
+                self._session_alerts += 1
+
+        # Alert handling
+        if is_alert and not self._alert_active:
+            self._alert_active = True
+            log_event("ALERT_TRIGGERED",
+                      f"count={count} limit={self.safety_limit}")
+            self._play_alert_sound()
+            self._send_desktop_notification(count)
+        elif not is_alert and self._alert_active:
+            self._alert_active = False
+            self._stop_alert_sound()
+            log_event("ALERT_CLEARED", f"count={count}")
 
         if is_alert:
             self.sb.showMessage(f"ALERT: {count} people detected (limit: {self.safety_limit})")
 
     def _on_video_ended(self):
-        self.stop_worker()
-        self.set_state("stopped")
+        self._stop_worker()
+        self._set_state("stopped")
         self.sb.showMessage("Playback complete.")
-        log_event(self.username, "VIDEO_ENDED", "")
+        log_event("VIDEO_ENDED", "")
+        self._stop_alert_sound()
+        self._alert_active = False
+        self._finalise_session()
 
     def _on_detect_error(self, msg: str):
         self.sb.showMessage("A detection error occurred (see audit log).")
-        log_event(self.username, "DETECTION_ERROR", msg[:300])
+        log_event("DETECTION_ERROR", msg[:300])
 
     def _on_live(self, source: str):
         if not self.detector:
             self.sb.showMessage("Model is still loading.")
             return
 
-        self.stop_worker()
+        self._stop_worker()
         self.analy.clear_session()
-        self._last_reading_t = 0.0
-        self.video_path = source
+        self._last_reading_t    = 0.0
+        self._session_peak      = 0
+        self._session_alerts    = 0
+        self._session_total     = 0
+        self._session_sum       = 0
+
+        self.video_path   = source
+        self.source_label = f"Camera {source}" if source.isdigit() else source
+
+        # Open persistent session in DB
+        self._current_session_id = create_session(self.source_label, self.safety_limit)
 
         self.worker = DetectionWorker(
             source=source,
             detector=self.detector,
             safety_limit=self.safety_limit,
-            speed=self.current_speed,
+            speed=getattr(self, "current_speed", 1.0),
             inference_interval=self.inference_interval,
+            show_overlay=self._show_overlay,
         )
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.stats_updated.connect(self._on_stats)
@@ -270,21 +345,25 @@ class MainWindow(QMainWindow):
         self.worker.error_occurred.connect(self._on_detect_error)
         self.worker.start()
 
-        self.set_state("playing")
-        label = f"Camera {source}" if source.isdigit() else source
-        log_event(self.username, "LIVE_STARTED", f"source={source}")
-        self.sb.showMessage(f"Live: {label}")
+        self._set_state("playing")
+        log_event("LIVE_STARTED", f"source={source}")
+        self.sb.showMessage(f"Live: {self.source_label}")
 
     def _on_speed(self, speed: float):
         self.current_speed = speed
         if self.worker:
             self.worker.speed = speed
 
-    # Program Configuration & Tab Changes
+    # ── Overlay Toggle ────────────────────────────────────────────────────
+
+    def _on_overlay_toggled(self, show: bool):
+        self._show_overlay = show
+        if self.worker:
+            self.worker.show_overlay = show
+
+    # ── Settings ──────────────────────────────────────────────────────────
 
     def _on_settings(self):
-        if self.role != "admin":
-            return
         from ui.settings_dialog import SettingsDialog
         dlg = SettingsDialog(
             safety_limit=self.safety_limit,
@@ -294,92 +373,92 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if dlg.exec():
-            self.safety_limit = dlg.safety_limit
-            self.confidence = dlg.confidence
-            self.inference_interval = dlg.inference_interval
+            self.safety_limit         = dlg.safety_limit
+            self.confidence           = dlg.confidence
+            self.inference_interval   = dlg.inference_interval
             self.inference_resolution = dlg.inference_resolution
 
+            # Persist settings
+            save_setting("safety_limit",         self.safety_limit)
+            save_setting("confidence",            self.confidence)
+            save_setting("inference_interval",    self.inference_interval)
+            save_setting("inference_resolution",  self.inference_resolution)
+
+            # Sync with Analytics tab
+            self.analy.safety_limit = self.safety_limit
+
             if self.worker:
-                self.worker.safety_limit = self.safety_limit
+                self.worker.safety_limit       = self.safety_limit
                 self.worker.inference_interval = self.inference_interval
 
             if self.detector:
                 self.detector.confidence = self.confidence
-                self.detector.imgsz = self.inference_resolution
+                self.detector.imgsz      = self.inference_resolution
+
+            log_event("SETTINGS_CHANGED",
+                      f"limit={self.safety_limit} conf={self.confidence:.2f} "
+                      f"interval={self.inference_interval} res={self.inference_resolution}")
+
+    # ── Tab Changes ───────────────────────────────────────────────────────
 
     def _on_tab_changed(self, index: int):
         if self.tabs.widget(index) is self.logs:
             self.logs.refresh()
 
-    # Session Lifecycle & Authentication Realignment
+    # ── Alert Sound & Notification ────────────────────────────────────────
 
-    def _on_logout(self):
-        reply = QMessageBox.question(
-            self, "Logout",
-            f"Log out as {self.username}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
+    def _play_alert_sound(self):
+        """Play Windows system alert sound once (non-blocking)."""
+        try:
+            winsound.PlaySound(
+                "SystemAsterisk",
+                winsound.SND_ALIAS | winsound.SND_ASYNC
+            )
+        except Exception:
+            pass
 
-        self.stop_worker()
-        log_event(self.username, "LOGOUT", "")
-        self.prompt_relogin()
+    def _stop_alert_sound(self):
+        """Stop playing alert sound."""
+        try:
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
 
-    def prompt_relogin(self):
-        """Hides current session layout and presents validation checks."""
-        self.hide()
-        from auth.login_dialog import LoginDialog
-        login = LoginDialog(None)
-        if login.exec() == LoginDialog.DialogCode.Accepted:
-            old_role = self.role
-            self.username = login.authenticated_username
-            self.role = login.authenticated_role
-            self.update_user_context(old_role)
-            self.show()
-        else:
-            self.close()
+    def _send_desktop_notification(self, count: int):
+        """Send a native desktop notification toast using QSystemTrayIcon (with cooldown)."""
+        now = time.monotonic()
+        if now - self._last_notification_t >= 30.0:
+            self._last_notification_t = now
+            self.tray_icon.showMessage(
+                "CrowdSense - Safety Alert",
+                f"Safety limit exceeded! {count} people detected.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                8000
+            )
 
-    def update_user_context(self, old_role: str):
-        """Clears stale views and reconfigures permissions post authentication."""
-        self.dash.username = self.username
-        self.dash.role = self.role
-        self.dash.lbl_user.setText(self.username)
+    # ── State Management ──────────────────────────────────────────────────
 
-        role_color = "#f85149" if self.role == "admin" else "#3fb950"
-        self.dash.lbl_role.setText(self.role.upper())
-        self.dash.lbl_role.setStyleSheet(
-            f"font-size: 10px; color: {role_color}; font-weight: 600;"
-        )
-        
-        if self.role == "admin":
-            self.dash.btn_settings.show()
-        else:
-            self.dash.btn_settings.hide()
-
-        self.about.update_user(self.username, self.role)
-        self.logs.set_user_context(self.username, self.role)
-        
-        logs_idx = self.tabs.indexOf(self.logs)
-        if logs_idx != -1:
-            self.tabs.setTabVisible(logs_idx, self.role == "admin")
-
-        self.analy.clear_session()
-        self.tabs.setCurrentIndex(0)
-
-        self.set_state("stopped")
-        self.video_path = ""
-        self.dash.set_video_label("No channel selected\n\nSelect a CCTV channel to begin")
-        self.dash.update_stats(0, "—", "#8b949e", False)
-
-        self.sb.showMessage(f"Logged in as {self.username} ({self.role}).")
-        log_event(self.username, "LOGIN_SUCCESS", "Re-login after logout")
-
-    def set_state(self, state: str):
+    def _set_state(self, state: str):
         self.playback_state = state
         self.dash.set_playback_state(state)
 
+    def _generate_check_image(self):
+        """Programmatically generate a clean checkbox checkmark image if missing."""
+        check_path = _ASSETS_DIR / "check.png"
+        if not check_path.exists():
+            try:
+                _ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+                from PIL import Image, ImageDraw
+                im = Image.new("RGBA", (16, 16), (255, 255, 255, 0))
+                draw = ImageDraw.Draw(im)
+                # Draw a sleek anti-aliased checkmark line
+                draw.line([(3, 8), (7, 12), (13, 4)], fill=(230, 237, 243), width=2, joint="round")
+                im.save(str(check_path))
+            except Exception:
+                pass
+
     def closeEvent(self, event):
-        QApplication.instance().removeEventFilter(self)
-        self.stop_worker()
+        self._stop_alert_sound()
+        self._stop_worker()
+        self._finalise_session()
         super().closeEvent(event)

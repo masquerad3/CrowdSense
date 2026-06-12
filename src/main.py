@@ -1,15 +1,23 @@
 import sys
 import os
 
+# Pre-load torch to prevent Windows DLL namespace / OpenMP runtime conflicts when PyQt6 loads first
+try:
+    import torch
+except ImportError:
+    pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from pathlib import Path
 from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 
 from auth.db import init_db
-from auth.login_dialog import LoginDialog
 from ui.main_window import MainWindow
 from ui.styles import MAIN_STYLESHEET
+
+_ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 
 
 def main():
@@ -19,8 +27,12 @@ def main():
     app.setStyleSheet(MAIN_STYLESHEET)
     app.setFont(QFont("Segoe UI", 10))
 
-    # Initialize database
-    # Creates tables and default accounts (admin / viewer) on first run.
+    # Set application-wide window icon
+    logo_path = _ASSETS_DIR / "logo.png"
+    if logo_path.exists():
+        app.setWindowIcon(QIcon(str(logo_path)))
+
+    # Initialize database — creates tables and seeds defaults on first run
     try:
         init_db()
     except Exception as exc:
@@ -32,16 +44,8 @@ def main():
         )
         sys.exit(1)
 
-    # Login
-    login = LoginDialog()
-    if login.exec() != LoginDialog.DialogCode.Accepted:
-        sys.exit(0)    # user closed the login dialog -> clean exit
-
-    # Launch main window
-    window = MainWindow(
-        username=login.authenticated_username,
-        role=login.authenticated_role,
-    )
+    # Launch main window directly — no login required
+    window = MainWindow()
     window.show()
     sys.exit(app.exec())
 

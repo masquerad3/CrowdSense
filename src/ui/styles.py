@@ -373,4 +373,35 @@ QWidget#toolbar QPushButton {
     padding: 3px 10px;
     font-size: 12px;
 }
+
+/* ================================================================
+   SUBTABS PANE BORDER REMOVAL
+   ================================================================ */
+QTabWidget#subTabs::pane {
+    border: none;
+}
+
+/* ================================================================
+   CHECKBOX STYLE
+   ================================================================ */
+QCheckBox {
+    spacing: 8px;
+    font-size: 13px;
+    color: #8b949e;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    background-color: #161b22;
+}
+QCheckBox::indicator:hover {
+    border-color: #58a6ff;
+}
+QCheckBox::indicator:checked {
+    background-color: #1f6feb;
+    border-color: #388bfd;
+    image: url(assets/check.png);
+}
 """

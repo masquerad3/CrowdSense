@@ -1,15 +1,12 @@
 """
-CrowdSense Auth Database (src/auth/db.py)
+CrowdSense Database Interface (src/auth/db.py)
 
-Handles password hashing (scrypt) and database connection/schema setup.
-Includes account lockout logic for security.
+Handles SQLite connections, database migrations, cryptographic audit logging,
+persistent settings, session analytics, and database retention/purging.
 """
 
 import sqlite3
 import hashlib
-import hmac
-import os
-import base64
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -17,269 +14,121 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 DB_DIR = ROOT_DIR / "data"
 DB_PATH = DB_DIR / "crowdsense.db"
 
-# scrypt cost parameters (OWASP minimum for interactive logins)
-SCRYPT_N = 2 ** 14 # CPU Cost
-SCRYPT_R = 8 # Memory Cost
-SCRYPT_P = 1 # Parallelism Cost
-SCRYPT_DKLEN = 32 # Length of the desired key
-
-# Lockout policy
-MAX_ATTEMPTS = 5 # Maximum number of failed attempts before lockout
-LOCKOUT_MINUTES = 15 # Duration of lockout in minutes
-
-
-# Password hashing helpers
-
-def hash_password(password: str) -> str:
-    salt = os.urandom(32)
-    key = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=SCRYPT_N,
-        r=SCRYPT_R,
-        p=SCRYPT_P,
-        dklen=SCRYPT_DKLEN
-    )
-    return (base64.b64encode(salt).decode("ascii") + "$" +
-            base64.b64encode(key).decode("ascii"))
-
-
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        salt_b64, key_b64 = stored.split("$", 1)
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(key_b64)
-        actual = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=salt,
-            n=SCRYPT_N,
-            r=SCRYPT_R,
-            p=SCRYPT_P,
-            dklen=SCRYPT_DKLEN
-        )
-        return hmac.compare_digest(actual, expected)
-    except Exception:
-        return False
-
-
-# Database connection
 
 def get_db_connection() -> sqlite3.Connection:
     DB_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
-# Database Schema & Initialization
-
 def init_db() -> None:
+    """Initialize the SQLite database schema and run structural migrations."""
+    # Temporarily disable foreign keys during potential structural alterations
     with get_db_connection() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                username        TEXT    UNIQUE NOT NULL,
-                password_hash   TEXT    NOT NULL,
-                role            TEXT    NOT NULL DEFAULT 'user'
-                                        CHECK(role IN ('admin', 'user')),
-                created_at      TEXT    NOT NULL,
-                failed_attempts INTEGER NOT NULL DEFAULT 0,
-                locked_until    TEXT
-            );
+        conn.execute("PRAGMA foreign_keys=OFF")
 
+        # ── Drop Obsolete Users Table ──────────────────────────────────────────
+        conn.execute("DROP TABLE IF EXISTS users")
+
+        # ── Migration: audit_log (Remove username column) ──────────────────────
+        cursor = conn.execute("PRAGMA table_info(audit_log)")
+        cols = [r[1] for r in cursor.fetchall()]
+        if cols and "username" in cols:
+            conn.execute("ALTER TABLE audit_log RENAME TO audit_log_old")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action     TEXT NOT NULL,
+                    details    TEXT DEFAULT '',
+                    timestamp  TEXT NOT NULL,
+                    entry_hash TEXT
+                );
+            """)
+            conn.execute("""
+                INSERT INTO audit_log (id, action, details, timestamp, entry_hash)
+                SELECT id, action, details, timestamp, entry_hash FROM audit_log_old
+            """)
+            conn.execute("DROP TABLE audit_log_old")
+
+        # ── Migration: sessions (Remove operator column) ───────────────────────
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        cols = [r[1] for r in cursor.fetchall()]
+        if cols and "operator" in cols:
+            # Drop child table first to prevent broken foreign key references
+            conn.execute("DROP TABLE IF EXISTS session_readings")
+            conn.execute("ALTER TABLE sessions RENAME TO sessions_old")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_label  TEXT,
+                    started_at    TEXT NOT NULL,
+                    ended_at      TEXT,
+                    peak_count    INTEGER DEFAULT 0,
+                    avg_count     REAL DEFAULT 0,
+                    total_samples INTEGER DEFAULT 0,
+                    alert_events  INTEGER DEFAULT 0
+                );
+            """)
+            conn.execute("""
+                INSERT INTO sessions (id, source_label, started_at, ended_at, peak_count, avg_count, total_samples, alert_events)
+                SELECT id, source_label, started_at, ended_at, peak_count, avg_count, total_samples, alert_events FROM sessions_old
+            """)
+            conn.execute("DROP TABLE sessions_old")
+
+        # ── Migration: sessions (Add safety_limit column if missing) ───────────
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        cols = [r[1] for r in cursor.fetchall()]
+        if cols and "safety_limit" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN safety_limit INTEGER DEFAULT 30")
+
+        # ── Schema Creation (If tables don't exist) ──────────────────────────
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS audit_log (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                username  TEXT NOT NULL,
-                action    TEXT NOT NULL,
-                details   TEXT DEFAULT '',
-                timestamp TEXT NOT NULL,
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                action     TEXT NOT NULL,
+                details    TEXT DEFAULT '',
+                timestamp  TEXT NOT NULL,
                 entry_hash TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_label  TEXT,
+                started_at    TEXT NOT NULL,
+                ended_at      TEXT,
+                peak_count    INTEGER DEFAULT 0,
+                avg_count     REAL DEFAULT 0,
+                total_samples INTEGER DEFAULT 0,
+                alert_events  INTEGER DEFAULT 0,
+                safety_limit  INTEGER DEFAULT 30
+            );
+
+            CREATE TABLE IF NOT EXISTS session_readings (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+                sampled_at   TEXT NOT NULL,
+                count        INTEGER,
+                density      TEXT,
+                alert_active INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
-
-        # Migrate existing databases that predate the lockout columns
-        existing_cols = {
-            r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
-        if "failed_attempts" not in existing_cols:
-            conn.execute(
-                "ALTER TABLE users ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0"
-            )
-        if "locked_until" not in existing_cols:
-            conn.execute("ALTER TABLE users ADD COLUMN locked_until TEXT")
-
-        # Migrate existing audit_log to include entry_hash column and backfill hashes
-        existing_audit_cols = {
-            r[1] for r in conn.execute("PRAGMA table_info(audit_log)").fetchall()
-        }
-        if "entry_hash" not in existing_audit_cols:
-            conn.execute("ALTER TABLE audit_log ADD COLUMN entry_hash TEXT")
-            rows = conn.execute("SELECT id, username, action, details, timestamp FROM audit_log ORDER BY id ASC").fetchall()
-            prev_hash = "GENESIS"
-            for row in rows:
-                row_id = row["id"]
-                hash_data = f"{prev_hash}|{row['username']}|{row['action']}|{row['details']}|{row['timestamp']}"
-                curr_hash = hashlib.sha256(hash_data.encode("utf-8")).hexdigest()
-                conn.execute("UPDATE audit_log SET entry_hash=? WHERE id=?", (curr_hash, row_id))
-                prev_hash = curr_hash
-
-        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-            insert_user(conn, "admin",  "Admin@123",  "admin")
-            insert_user(conn, "viewer", "Viewer@123", "user")
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
-def insert_user(conn: sqlite3.Connection, username: str,
-                 password: str, role: str) -> None:
-    conn.execute(
-        "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-        (username, hash_password(password), role, datetime.now().isoformat())
-    )
+# ── Cryptographic Audit Logging API ───────────────────────────────────────────
 
-
-# User Authentication & Management API
-
-def authenticate(username: str, password: str) -> dict | None:
-    """
-    Verify credentials.
-
-    Returns:
-      {'id', 'username', 'role'}  - success
-      {'locked': True}            - account is locked (too many failures)
-      None                        - invalid credentials
-    """
+def log_event(action: str, details: str = "") -> None:
+    """Log an audit event bound by a cryptographic hash chain."""
     try:
-        with get_db_connection() as conn:
-            row = conn.execute(
-                "SELECT id, password_hash, role, failed_attempts, locked_until "
-                "FROM users WHERE username = ?",
-                (username,)
-            ).fetchone()
-
-        if row is None:
-            verify_password("_dummy_", hash_password("_dummy_"))
-            return None
-
-        # Check persistent lockout
-        locked_until = row["locked_until"]
-        if locked_until:
-            if datetime.now().isoformat() < locked_until:
-                return {"locked": True}
-            # Lock period expired — reset counter
-            with get_db_connection() as conn:
-                conn.execute(
-                    "UPDATE users SET failed_attempts=0, locked_until=NULL WHERE username=?",
-                    (username,)
-                )
-
-        if verify_password(password, row["password_hash"]):
-            # Success — clear any previous failure counts
-            with get_db_connection() as conn:
-                conn.execute(
-                    "UPDATE users SET failed_attempts=0, locked_until=NULL WHERE username=?",
-                    (username,)
-                )
-            return {"id": row["id"], "username": username, "role": row["role"]}
-
-        # Wrong password — increment counter, lock if threshold reached
-        new_attempts = (row["failed_attempts"] or 0) + 1
-        new_lock     = None
-        if new_attempts >= MAX_ATTEMPTS:
-            new_lock = (datetime.now() + timedelta(minutes=LOCKOUT_MINUTES)).isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                "UPDATE users SET failed_attempts=?, locked_until=? WHERE username=?",
-                (new_attempts, new_lock, username)
-            )
-        return None
-
-    except Exception:
-        return None
-
-
-def reset_lockout(username: str) -> bool:
-    """Unlock an account and reset its failed-attempt counter."""
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "UPDATE users SET failed_attempts=0, locked_until=NULL WHERE username=?",
-                (username,)
-            )
-        return True
-    except Exception:
-        return False
-
-
-def lock_user(username: str) -> bool:
-    """Manually lock an account for LOCKOUT_MINUTES."""
-    try:
-        lock_until = (datetime.now() + timedelta(minutes=LOCKOUT_MINUTES)).isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                "UPDATE users SET locked_until=? WHERE username=?",
-                (lock_until, username)
-            )
-        return True
-    except Exception:
-        return False
-
-
-def update_role(username: str, new_role: str) -> bool:
-    """Change a user's role (admin/user)."""
-    if new_role not in ("admin", "user"):
-        return False
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "UPDATE users SET role=? WHERE username=?",
-                (new_role, username)
-            )
-        return True
-    except Exception:
-        return False
-
-
-def delete_user(username: str) -> bool:
-    """Permanently remove a user account."""
-    try:
-        with get_db_connection() as conn:
-            conn.execute("DELETE FROM users WHERE username=?", (username,))
-        return True
-    except Exception:
-        return False
-
-
-def change_password(username: str, new_password: str) -> bool:
-    """Set a new password for a user account."""
-    try:
-        new_hash = hash_password(new_password)
-        with get_db_connection() as conn:
-            conn.execute(
-                "UPDATE users SET password_hash=?, failed_attempts=0, locked_until=NULL WHERE username=?",
-                (new_hash, username)
-            )
-        return True
-    except Exception:
-        return False
-
-
-def create_user(username: str, password: str, role: str = "user") -> str | None:
-    """
-    Create a new user. Returns None on success, or an error string on failure.
-    """
-    try:
-        with get_db_connection() as conn:
-            insert_user(conn, username, password, role)
-        return None
-    except sqlite3.IntegrityError:
-        return "username_taken"
-    except Exception as e:
-        return str(e)
-
-
-def log_event(username: str, action: str, details: str = "") -> None:
-    try:
-        # Fetch previous hash from database
+        # Fetch previous hash
         try:
             with get_db_connection() as conn:
                 row = conn.execute(
@@ -289,16 +138,16 @@ def log_event(username: str, action: str, details: str = "") -> None:
         except Exception:
             prev_hash = "GENESIS"
 
-        # Compute the hash chain for the new entry
+        # Compute hash chain signature
         timestamp = datetime.now().isoformat()
-        hash_data = f"{prev_hash}|{username}|{action}|{str(details)[:500]}|{timestamp}"
+        hash_data = f"{prev_hash}|{action}|{str(details)[:500]}|{timestamp}"
         entry_hash = hashlib.sha256(hash_data.encode("utf-8")).hexdigest()
 
         # Save to database
         with get_db_connection() as conn:
             conn.execute(
-                "INSERT INTO audit_log (username, action, details, timestamp, entry_hash) VALUES (?, ?, ?, ?, ?)",
-                (username, action, str(details)[:500], timestamp, entry_hash)
+                "INSERT INTO audit_log (action, details, timestamp, entry_hash) VALUES (?, ?, ?, ?)",
+                (action, str(details)[:500], timestamp, entry_hash)
             )
     except Exception:
         pass
@@ -306,77 +155,212 @@ def log_event(username: str, action: str, details: str = "") -> None:
 
 def verify_audit_log_integrity() -> bool:
     """
-    Crawls through the entire audit log from oldest to newest
-    and recalculates the hash chain to check for tampering.
-    Returns True if valid, False if tampered/broken.
+    Crawls the entire audit log from oldest to newest and recalculates the SHA-256
+    hash chain. Returns True if all signatures match, False if tampered or broken.
     """
     try:
         with get_db_connection() as conn:
             rows = conn.execute(
-                "SELECT username, action, details, timestamp, entry_hash "
-                "FROM audit_log ORDER BY id ASC"
+                "SELECT action, details, timestamp, entry_hash FROM audit_log ORDER BY id ASC"
             ).fetchall()
-        
+
         prev_hash = "GENESIS"
         for row in rows:
-            username = row["username"]
             action = row["action"]
             details = row["details"]
             timestamp = row["timestamp"]
             stored_hash = row["entry_hash"]
-            
+
             # Recalculate hash
-            hash_data = f"{prev_hash}|{username}|{action}|{details}|{timestamp}"
+            hash_data = f"{prev_hash}|{action}|{details}|{timestamp}"
             calc_hash = hashlib.sha256(hash_data.encode("utf-8")).hexdigest()
-            
+
             if calc_hash != stored_hash:
-                return False  # Chain broken
+                return False
             prev_hash = calc_hash
-            
-        return True # All checks passed
+
+        return True
     except Exception:
         return False
 
 
-def get_audit_log(limit: int | None = 500, username: str | None = None, search_query: str | None = None) -> list[dict]:
+def get_audit_log(limit: int | None = 500, search_query: str | None = None,
+                  alerts_only: bool = False) -> list[dict]:
+    """Retrieve audit log entries matching search and filter parameters."""
     try:
         with get_db_connection() as conn:
-            sql = "SELECT username, action, details, timestamp, entry_hash FROM audit_log"
+            sql = "SELECT action, details, timestamp, entry_hash FROM audit_log"
             conditions = []
             params = []
-            
-            if username and username != "[All Users]":
-                conditions.append("username = ?")
-                params.append(username)
-                
+
             if search_query:
-                conditions.append("(username LIKE ? OR action LIKE ? OR details LIKE ?)")
+                conditions.append("(action LIKE ? OR details LIKE ?)")
                 q = f"%{search_query}%"
-                params.extend([q, q, q])
-                
+                params.extend([q, q])
+
+            if alerts_only:
+                conditions.append("action LIKE ?")
+                params.append("ALERT%")
+
             if conditions:
                 sql += " WHERE " + " AND ".join(conditions)
-                
+
             sql += " ORDER BY id DESC"
-            
+
             if limit is not None:
                 sql += " LIMIT ?"
                 params.append(limit)
-                
+
             rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
 
 
-def get_users() -> list[dict]:
-    """Return all user accounts with lockout status. No password hashes."""
+# ── Settings Persistence API ──────────────────────────────────────────────────
+
+def save_setting(key: str, value) -> None:
+    """Upsert a key-value setting."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str(value))
+            )
+    except Exception:
+        pass
+
+
+def get_setting(key: str, default=None):
+    """Retrieve a setting value by key, returning default if not found."""
+    try:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key=?", (key,)
+            ).fetchone()
+        return row["value"] if row else default
+    except Exception:
+        return default
+
+
+# ── Session Analytics & Pruning API ───────────────────────────────────────────
+
+def create_session(source_label: str = "", safety_limit: int = 30) -> int | None:
+    """Create a new session record and return its ID."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.execute(
+                "INSERT INTO sessions (source_label, started_at, safety_limit) VALUES (?, ?, ?)",
+                (source_label, datetime.now().isoformat(), safety_limit)
+            )
+            return cur.lastrowid
+    except Exception:
+        return None
+
+
+def close_session(session_id: int, peak_count: int, avg_count: float,
+                  total_samples: int, alert_events: int) -> None:
+    """Finalize a session with aggregates."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE sessions SET ended_at=?, peak_count=?, avg_count=?, "
+                "total_samples=?, alert_events=? WHERE id=?",
+                (datetime.now().isoformat(), peak_count, avg_count,
+                 total_samples, alert_events, session_id)
+            )
+    except Exception:
+        pass
+
+
+def insert_reading(session_id: int, count: int,
+                   density: str, alert_active: bool) -> None:
+    """Insert a 1-Hz sensor reading for a session."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO session_readings (session_id, sampled_at, count, density, alert_active) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, datetime.now().isoformat(), count, density, int(alert_active))
+            )
+    except Exception:
+        pass
+
+
+def get_sessions(limit: int = 200) -> list[dict]:
+    """Retrieve recent completed or active sessions, newest first."""
     try:
         with get_db_connection() as conn:
             rows = conn.execute(
-                "SELECT id, username, role, created_at, failed_attempts, locked_until "
-                "FROM users ORDER BY id"
+                "SELECT id, source_label, started_at, ended_at, "
+                "peak_count, avg_count, total_samples, alert_events, safety_limit "
+                "FROM sessions ORDER BY id DESC LIMIT ?",
+                (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
+
+
+def get_session_readings(session_id: int) -> list[dict]:
+    """Retrieve 1-Hz readings of a specific session, oldest first."""
+    try:
+        with get_db_connection() as conn:
+            rows = conn.execute(
+                "SELECT sampled_at, count, density, alert_active "
+                "FROM session_readings WHERE session_id=? ORDER BY id ASC",
+                (session_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def delete_session(session_id: int) -> bool:
+    """Delete a session. CASCADE deletes associated readings."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+        return True
+    except Exception:
+        return False
+
+
+def delete_all_sessions() -> bool:
+    """Delete all sessions from the database. CASCADE deletes associated readings."""
+    try:
+        with get_db_connection() as conn:
+            conn.execute("DELETE FROM sessions")
+        log_event("DATABASE_CLEARED", "Permanently deleted all sessions and readings.")
+        return True
+    except Exception as exc:
+        log_event("CLEAR_ERROR", str(exc))
+        return False
+
+
+def prune_database(retention_days: int) -> int:
+    """Delete sessions and readings older than retention_days. Return number of deleted sessions."""
+    if retention_days <= 0:
+        return 0
+    try:
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        with get_db_connection() as conn:
+            # Get list of expired session IDs
+            cur = conn.execute("SELECT id FROM sessions WHERE started_at < ?", (cutoff,))
+            session_ids = [row["id"] for row in cur.fetchall()]
+            if not session_ids:
+                return 0
+
+            # Delete them (cascading automatically deletes readings)
+            placeholders = ",".join("?" for _ in session_ids)
+            conn.execute(
+                f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                session_ids
+            )
+            # Log prune event
+            log_event("DATABASE_PRUNED", f"Purged {len(session_ids)} sessions older than {retention_days} days.")
+            return len(session_ids)
+    except Exception as exc:
+        log_event("PRUNE_ERROR", str(exc))
+        return 0

@@ -5,14 +5,13 @@ ModelLoaderWorker  — loads YOLO in the background so the UI stays responsive
 DetectionWorker    — reads frames and runs detection; supports:
                        * video file paths  (str)
                        * camera indices    (int, or str digit e.g. "0")
-                       * RTSP / RTMP URLs  (str starting with rtsp:// or rtmp://)
 
 Performance knobs:
   inference_interval — run YOLO only every N frames (default 1 = every frame).
                        Frames in between are still emitted with cached boxes
                        and stats drawn by the detector, keeping playback smooth.
 
-For live sources (camera / RTSP), temporary read failures are retried rather
+For live sources (camera), temporary read failures are retried rather
 than treated as end-of-stream, and video_ended is never emitted.
 """
 
@@ -47,7 +46,7 @@ class DetectionWorker(QThread):
     """
     Reads frames from a source and emits annotated frames + stats.
 
-    source             — str file path | str camera index ("0", "1") | str RTSP URL | int camera index
+    source             — str file path | str camera index ("0", "1") | int camera index
     detector           — CrowdDetector instance
     safety_limit       — person count threshold for alerts
     speed              — playback speed multiplier (file sources only)
@@ -64,12 +63,14 @@ class DetectionWorker(QThread):
 
     def __init__(self, source, detector: CrowdDetector,
                  safety_limit: int = 30, speed: float = 1.0,
-                 inference_interval: int = 1, parent=None):
+                 inference_interval: int = 1,
+                 show_overlay: bool = True, parent=None):
         super().__init__(parent)
         self.detector           = detector
         self.safety_limit       = safety_limit
         self.speed              = speed
         self.inference_interval = max(1, inference_interval)
+        self.show_overlay       = show_overlay
         self._running           = True
         self._paused            = False
         self._frame_count       = 0   # counts every decoded frame
@@ -82,12 +83,6 @@ class DetectionWorker(QThread):
             self.is_live = True
         elif isinstance(source, str) and source.strip().isdigit():
             self._src    = int(source.strip())
-            self.is_live = True
-        elif isinstance(source, str) and (
-            source.lower().startswith("rtsp://") or
-            source.lower().startswith("rtmp://")
-        ):
-            self._src    = source
             self.is_live = True
         else:
             self._src    = source
@@ -131,6 +126,7 @@ class DetectionWorker(QThread):
                     frame,
                     self.safety_limit,
                     skip_inference=skip,
+                    show_overlay=self.show_overlay,
                 )
             except Exception as exc:
                 self.error_occurred.emit(str(exc))

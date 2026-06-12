@@ -12,6 +12,8 @@ Wraps YOLOv8n / YOLO11n to:
   • Support configurable inference resolution (imgsz) for CPU speed control.
   • Automatically detects the best available model format (OpenVINO > ONNX > PyTorch)
     for maximum CPU inference performance.
+  • Support overlay toggle: when show_overlay=False, returns clean raw frame
+    without any drawings so the operator can watch unobstructed.
 
 Model auto-detection priority order (all searched inside models/):
   1. yolo11n_openvino_model/   (OpenVINO — fastest on Intel CPU, ~2-4x speedup)
@@ -52,21 +54,24 @@ def _detect_best_model() -> tuple[Path, str]:
 
 
 # ── Density classification ────────────────────────────────────────────────────
-# Each entry: (min_count, max_count, label, qt_hex_color, cv2_bgr_color)
-DENSITY_LEVELS = [
-    (0,   10,   "Low",      "#4caf50", (80,  175, 76)),   # green
-    (10,  25,   "Medium",   "#ff9800", (0,   152, 255)),  # orange
-    (25,  50,   "High",     "#f44336", (54,  67,  244)),  # red
-    (50,  9999, "Critical", "#9c27b0", (176, 39,  156)),  # purple
-]
+# The density level ranges are dynamically calculated relative to the safety_limit:
+#   - Low: < 33% of safety limit
+#   - Medium: 33% to < 66% of safety limit
+#   - High: 66% to < 100% of safety limit
+#   - Critical: >= 100% of safety limit (alert state)
 
-
-def _get_level(count: int) -> tuple[str, str, tuple]:
-    """Return (label, hex_color, bgr_color) for a given people count."""
-    for lo, hi, label, hex_col, bgr in DENSITY_LEVELS:
-        if lo <= count < hi:
-            return label, hex_col, bgr
-    return DENSITY_LEVELS[-1][2], DENSITY_LEVELS[-1][3], DENSITY_LEVELS[-1][4]
+def _get_level(count: int, safety_limit: int = 30) -> tuple[str, str, tuple]:
+    """Return (label, hex_color, bgr_color) for a given people count relative to safety_limit."""
+    limit = max(1, safety_limit)
+    pct = count / limit
+    if pct < 0.33:
+        return "Low", "#4caf50", (80, 175, 76)        # green
+    elif pct < 0.66:
+        return "Medium", "#ff9800", (0, 152, 255)     # orange
+    elif pct < 1.00:
+        return "High", "#f44336", (54, 67, 244)       # red
+    else:
+        return "Critical", "#9c27b0", (176, 39, 156)  # purple
 
 
 class CrowdDetector:
@@ -82,6 +87,9 @@ class CrowdDetector:
         # On skipped frames (no inference needed):
         annotated_frame, stats = detector.detect(frame, safety_limit=30,
                                                   skip_inference=True)
+        # With overlay hidden (clean raw view):
+        annotated_frame, stats = detector.detect(frame, safety_limit=30,
+                                                  show_overlay=False)
 
     stats dict keys:
         count            int   — number of people detected
@@ -146,7 +154,8 @@ class CrowdDetector:
 
     def detect(self, frame: np.ndarray,
                safety_limit: int = 30,
-               skip_inference: bool = False) -> tuple:
+               skip_inference: bool = False,
+               show_overlay: bool = True) -> tuple:
         """
         Detect people in a BGR frame.
 
@@ -156,11 +165,12 @@ class CrowdDetector:
             skip_inference — if True, skip YOLO model call and reuse cached
                              boxes from the previous detected frame. This keeps
                              the video at full playback speed on slow CPUs.
+            show_overlay   — if False, return a clean copy of the frame with
+                             no bounding boxes, labels, or HUD drawn. Detection
+                             still runs normally; only the visualisation is hidden.
 
         Returns: (annotated_frame: np.ndarray, stats: dict)
         """
-        annotated = frame.copy()
-
         if not skip_inference:
             # ── Run YOLO ──────────────────────────────────────────────
             results = self.model.predict(
@@ -188,6 +198,25 @@ class CrowdDetector:
         boxes = self._cached_boxes
         count = self._cached_count
 
+        # ── Density & alert state ──────────────────────────────────────
+        density_label, density_hex, density_bgr = _get_level(count, safety_limit)
+        is_alert = count >= safety_limit
+
+        # Update cached stats
+        self._cached_stats = {
+            "count":             count,
+            "density_label":     density_label,
+            "density_color_hex": density_hex,
+            "is_alert":          is_alert,
+        }
+
+        # ── Return clean frame if overlay is disabled ──────────────────
+        if not show_overlay:
+            return frame.copy(), self._cached_stats
+
+        annotated = frame.copy()
+        h, w = annotated.shape[:2]
+
         # ── Draw bounding boxes ────────────────────────────────────────
         box_color = (0, 230, 118)   # bright green
         for x1, y1, x2, y2, conf in boxes:
@@ -205,20 +234,6 @@ class CrowdDetector:
                 annotated, badge, (x1 + 2, y1 - 3),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA
             )
-
-        # ── Density & alert state ──────────────────────────────────────
-        density_label, density_hex, density_bgr = _get_level(count)
-        is_alert = count >= safety_limit
-
-        # Update cached stats
-        self._cached_stats = {
-            "count":             count,
-            "density_label":     density_label,
-            "density_color_hex": density_hex,
-            "is_alert":          is_alert,
-        }
-
-        h, w = annotated.shape[:2]
 
         # ── HUD panel (top-left semi-transparent overlay) ──────────────
         hud = annotated.copy()

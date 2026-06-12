@@ -2,16 +2,17 @@
 CrowdSense — Camera Picker Dialog  (src/ui/_camera_picker.py)
 
 Scans camera indices 0-9 using OpenCV to find real devices, then lets the
-user pick from a list. Also has a text field for RTSP/RTMP streams.
+user pick from a list.
 """
 
 import cv2
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QListWidget, QListWidgetItem, QLineEdit, QFrame, QApplication
+    QListWidget, QListWidgetItem, QApplication
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
+
 
 
 class _ScanWorker(QThread):
@@ -36,13 +37,13 @@ class _ScanWorker(QThread):
 class CameraPickerDialog(QDialog):
     """
     Shows available cameras and lets the user pick one.
-    After accept(), read selected_source (int index or str RTSP URL).
+    After accept(), read selected_source (int index).
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Select Camera — CrowdSense")
-        self.setFixedSize(440, 330)
+        self.setWindowTitle("Select Camera - CrowdSense")
+        self.setFixedSize(440, 220)
         self.setModal(True)
         self.selected_source = None
         self._build_ui()
@@ -59,7 +60,7 @@ class CameraPickerDialog(QDialog):
         root.addWidget(lbl_cam)
 
         self.list = QListWidget()
-        self.list.setFixedHeight(120)
+        self.list.setFixedHeight(100)
         self.list.itemDoubleClicked.connect(self._accept_list)
 
         self.scanning_lbl = QLabel("Scanning...")
@@ -68,21 +69,6 @@ class CameraPickerDialog(QDialog):
 
         root.addWidget(self.list)
         root.addWidget(self.scanning_lbl)
-
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #21262d;")
-        root.addWidget(sep)
-
-        # RTSP / manual entry
-        lbl_rtsp = QLabel("Or enter an RTSP / RTMP URL")
-        lbl_rtsp.setStyleSheet("font-size: 11px; color: #484f58;")
-        root.addWidget(lbl_rtsp)
-
-        self.txt_rtsp = QLineEdit()
-        self.txt_rtsp.setPlaceholderText("rtsp://192.168.1.10/stream")
-        root.addWidget(self.txt_rtsp)
 
         # Buttons
         btn_row = QHBoxLayout()
@@ -124,13 +110,8 @@ class CameraPickerDialog(QDialog):
         self.accept()
 
     def _accept(self):
-        rtsp = self.txt_rtsp.text().strip()
-        if rtsp:
-            self.selected_source = rtsp
-            self.accept()
-            return
-
         item = self.list.currentItem()
         if item:
             self.selected_source = item.data(Qt.ItemDataRole.UserRole)
             self.accept()
+
